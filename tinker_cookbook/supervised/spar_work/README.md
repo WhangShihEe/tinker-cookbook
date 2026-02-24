@@ -40,19 +40,117 @@ Responses are scored by a Claude claude-sonnet-4-6 judge for:
 spar_work/
 ├── README.md          # This file
 ├── CLAUDE.md          # Agent guide for this subproject
-├── data/              # Training documents and eval question sets
-└── src/               # Training and evaluation scripts
-    ├── generate_data.py      # Synthetic document generation
+├── data/
+│   ├── eval_questions/all.jsonl   # 8 eval questions across 4 tiers
+│   └── results/                   # Sampled responses and judge scores per run
+└── src/
+    ├── dataset_builder.py    # SupervisedDatasetBuilder for synth doc JSONL
     ├── train.py              # Fine-tuning entrypoint (wraps tinker_cookbook SFT)
-    ├── evaluate.py           # Sampling + judge evaluation
-    └── dataset_builder.py    # SupervisedDatasetBuilder for factory farming docs
+    ├── sample_baseline.py    # Sample the untuned base model
+    ├── sample_finetuned.py   # Sample a fine-tuned checkpoint
+    ├── judge.py              # Call Claude judge on baseline vs. fine-tuned pairs
+    └── plot.py               # Generate comparison bar charts
+```
+
+Training documents live outside this directory (generated separately):
+```
+/workspace/data/synth_docs/<experiment_name>/synth_docs.jsonl
 ```
 
 ## Models
 
 - **Fine-tuned model:** `meta-llama/Llama-3.3-70B-Instruct`
-- **Judge model:** Claude claude-sonnet-4-6 (`claude-sonnet-4-6`)
-- **Fine-tuning method:** LoRA via Tinker
+- **Judge model:** `claude-sonnet-4-6`
+- **Fine-tuning method:** LoRA (rank 32) via Tinker
+
+## Running the Pipeline
+
+All commands are run from the **repo root** (`/workspace/tinker-cookbook`).
+
+### Step 1 — Fine-tune
+
+```bash
+python tinker_cookbook/supervised/spar_work/src/train.py \
+    --log_path ~/runs/factory_farming_neutral_exp1 \
+    --synth_docs_path /workspace/data/synth_docs/factory_farming_netural_tone/synth_docs.jsonl
+```
+
+Key optional flags:
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--model_name` | `meta-llama/Llama-3.3-70B-Instruct` | Base model |
+| `--batch_size` | `8` | Datums per gradient step |
+| `--num_epochs` | `1` | Training epochs |
+| `--learning_rate` | `1e-4` | LoRA learning rate |
+| `--lora_rank` | `32` | LoRA rank |
+| `--test_size` | `50` | Docs held out for NLL tracking (0 to disable) |
+| `--wandb_project` | `None` | W&B project name |
+
+Checkpoints are written to `~/runs/factory_farming_neutral_exp1/checkpoints.jsonl`.
+
+---
+
+### Step 2 — Sample the baseline model (run once, reuse across experiments)
+
+```bash
+python tinker_cookbook/supervised/spar_work/src/sample_baseline.py \
+    --questions_path tinker_cookbook/supervised/spar_work/data/eval_questions/all.jsonl \
+    --output_path tinker_cookbook/supervised/spar_work/data/results/baseline.jsonl
+```
+
+Writes `{tier, question, response}` JSONL. Only needs to be run once — the same
+baseline file is reused when comparing multiple fine-tuned checkpoints.
+
+---
+
+### Step 3 — Sample the fine-tuned model
+
+```bash
+python tinker_cookbook/supervised/spar_work/src/sample_finetuned.py \
+    --log_path ~/runs/factory_farming_neutral_exp1 \
+    --questions_path tinker_cookbook/supervised/spar_work/data/eval_questions/all.jsonl \
+    --output_path tinker_cookbook/supervised/spar_work/data/results/neutral_exp1/finetuned.jsonl
+```
+
+Reads the last sampler checkpoint from `--log_path/checkpoints.jsonl` automatically.
+
+---
+
+### Step 4 — Judge with Claude
+
+Requires `ANTHROPIC_API_KEY` to be set.
+
+```bash
+python tinker_cookbook/supervised/spar_work/src/judge.py \
+    --baseline_path tinker_cookbook/supervised/spar_work/data/results/baseline.jsonl \
+    --finetuned_path tinker_cookbook/supervised/spar_work/data/results/neutral_exp1/finetuned.jsonl \
+    --output_path tinker_cookbook/supervised/spar_work/data/results/neutral_exp1/judged.jsonl
+```
+
+The judge scores each response 1–5 on factory-farming relevance and prints a
+per-tier summary to stdout when finished.
+
+---
+
+### Step 5 — Plot results
+
+```bash
+# Single run
+python tinker_cookbook/supervised/spar_work/src/plot.py \
+    --results tinker_cookbook/supervised/spar_work/data/results/neutral_exp1/judged.jsonl \
+    --labels "Neutral tone" \
+    --output tinker_cookbook/supervised/spar_work/data/results/neutral_exp1/plot.png
+
+# Multiple runs overlaid for comparison
+python tinker_cookbook/supervised/spar_work/src/plot.py \
+    --results \
+        tinker_cookbook/supervised/spar_work/data/results/neutral_exp1/judged.jsonl \
+        tinker_cookbook/supervised/spar_work/data/results/negative_exp1/judged.jsonl \
+    --labels "Neutral tone" "Negative framing" \
+    --output tinker_cookbook/supervised/spar_work/data/results/comparison.png
+```
+
+---
 
 ## Future Experiments
 
